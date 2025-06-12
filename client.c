@@ -81,7 +81,7 @@ void *receiver_thread(void *arg) {
     while (1) {
         memset(buffer, 0, sizeof(buffer));
         ssize_t len = recv(tab->sockfd, buffer, sizeof(buffer) - 1, 0);
-        if (len <= 0) break;  // disconnected or error
+        if (len <= 0) break;
         if (tab->msg_count < MAX_MSGS) {
             snprintf(tab->messages[tab->msg_count++], MAX_MSG_LENGTH, "Server: %s", buffer);
             if (tab == &tabs[current_tab]) draw_messages();
@@ -97,7 +97,6 @@ void *receiver_thread(void *arg) {
 
 void add_message(ChatTab *tab, const char *fmt, ...) {
     if (tab->msg_count >= MAX_MSGS) {
-        // shift up messages if full
         memmove(tab->messages, tab->messages + 1, sizeof(tab->messages[0]) * (MAX_MSGS - 1));
         tab->msg_count--;
     }
@@ -108,7 +107,6 @@ void add_message(ChatTab *tab, const char *fmt, ...) {
 }
 
 int main() {
-    // Init tabs: mark sockfd invalid
     for (int i = 0; i < MAX_TABS; i++) {
         tabs[i].sockfd = -1;
         tabs[i].msg_count = 0;
@@ -143,9 +141,12 @@ int main() {
         werase(input_win);
         box(input_win, 0, 0);
         mvwprintw(input_win, 1, 1, "> ");
+        wmove(input_win, 1, 3);  // move cursor after prompt
         wrefresh(input_win);
 
+        echo();  // Enable echo to show user input
         wgetnstr(input_win, input, sizeof(input) - 1);
+        noecho(); // Disable again after reading
 
         if (strcmp(input, "/quit") == 0) break;
         else if (strcmp(input, "/tab") == 0) {
@@ -158,14 +159,11 @@ int main() {
                 if (sockfd < 0) {
                     add_message(&tabs[current_tab], "Failed to connect to %s", ip);
                 } else {
-                    // Close old socket if open
                     if (tabs[current_tab].sockfd >= 0) close(tabs[current_tab].sockfd);
-
                     strncpy(tabs[current_tab].ip, ip, sizeof(tabs[current_tab].ip));
                     strncpy(tabs[current_tab].name, name, sizeof(tabs[current_tab].name));
                     tabs[current_tab].sockfd = sockfd;
                     add_message(&tabs[current_tab], "Connected to %s (%s)", name, ip);
-
                     pthread_create(&recv_threads[current_tab], NULL, receiver_thread, &tabs[current_tab]);
                     pthread_detach(recv_threads[current_tab]);
                 }
@@ -206,7 +204,6 @@ int main() {
             draw_messages();
         }
         else if (tabs[current_tab].sockfd >= 0) {
-            // Normal chat message
             send(tabs[current_tab].sockfd, input, strlen(input), 0);
             add_message(&tabs[current_tab], "You: %s", input);
             draw_messages();
@@ -216,7 +213,6 @@ int main() {
         }
     }
 
-    // Cleanup sockets
     for (int i = 0; i < MAX_TABS; i++) {
         if (tabs[i].sockfd >= 0) close(tabs[i].sockfd);
     }
