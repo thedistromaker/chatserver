@@ -1,6 +1,11 @@
-#pragma once
+#ifndef CONFIG_H
+#define CONFIG_H
 
-#define DEFAULT_PORT 11468
 #define PORT 11468
-#define BUFFER_SIZE 1024
-#define MAX_CLIENTS 10
+#define MAX_MSG_LENGTH 512
+#define MAX_NAME_LENGTH 64
+#define MAX_CLIENTS 15
+#define MAX_TABS 6
+#define MAX_MSGS 100
+
+#endif
