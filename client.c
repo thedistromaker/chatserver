@@ -1,101 +1,226 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
+#include <ncurses.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include "config.h"
 
-int sockfd = -1;
-int connected = 0;
+typedef struct {
+    char ip[64];
+    char name[MAX_NAME_LENGTH];
+    int sockfd;
+    WINDOW *win;
+    char messages[MAX_MSGS][MAX_MSG_LENGTH];
+    int msg_count;
+} ChatTab;
 
-void *receive_thread(void *arg) {
-    char buffer[BUFFER_SIZE];
-    while (1) {
-        int n = recv(sockfd, buffer, sizeof(buffer)-1, 0);
-        if (n <= 0) break;
-        buffer[n] = '\0';
-        printf("\r[Server] %s\n> ", buffer);
-        fflush(stdout);
+ChatTab tabs[MAX_TABS];
+int current_tab = 0;
+WINDOW *input_win;
+
+void draw_tab_bar() {
+    move(0, 0);
+    for (int i = 0; i < MAX_TABS; i++) {
+        if (i == current_tab)
+            attron(A_REVERSE);
+        if (tabs[i].name[0])
+            printw(" %s ", tabs[i].name);
+        else
+            printw(" Tab %d ", i + 1);
+        if (i == current_tab)
+            attroff(A_REVERSE);
+        printw(" ");
     }
-    return NULL;
+    clrtoeol();
+    refresh();
+}
+
+void draw_messages() {
+    ChatTab *tab = &tabs[current_tab];
+    werase(tab->win);
+    box(tab->win, 0, 0);
+    int max_lines = LINES - 5;
+    int start = (tab->msg_count > max_lines) ? tab->msg_count - max_lines : 0;
+    for (int i = start, y = 1; i < tab->msg_count; i++, y++) {
+        mvwprintw(tab->win, y, 2, "%s", tab->messages[i]);
+    }
+    wrefresh(tab->win);
+}
+
+void switch_tab(int direction) {
+    current_tab = (current_tab + direction + MAX_TABS) % MAX_TABS;
+    draw_tab_bar();
+    draw_messages();
+    wrefresh(input_win);
 }
 
 int connect_to_server(const char *ip, int port) {
-    struct sockaddr_in serv;
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    serv.sin_family = AF_INET;
-    serv.sin_port = htons(port);
-    inet_pton(AF_INET, ip, &serv.sin_addr);
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) return -1;
 
-    if (connect(s, (struct sockaddr*)&serv, sizeof(serv)) < 0) {
-        perror("connect");
-        close(s);
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+        .sin_addr.s_addr = inet_addr(ip)
+    };
+
+    if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sockfd);
         return -1;
     }
-
-    sockfd = s;
-    connected = 1;
-
-    pthread_t recv_tid;
-    pthread_create(&recv_tid, NULL, receive_thread, NULL);
-    pthread_detach(recv_tid);
-
-    printf("[+] Connected to %s:%d\n", ip, port);
-    return 0;
+    return sockfd;
 }
 
-void disconnect() {
-    if (connected) {
-        close(sockfd);
-        connected = 0;
-        printf("[-] Disconnected.\n");
-    }
-}
-
-void handle_command(char *input) {
-    if (strncmp(input, "/leave", 6) == 0) {
-        disconnect();
-    } else if (strncmp(input, "/join ", 6) == 0) {
-        char *ip = input + 6;
-        disconnect();
-        connect_to_server(ip, DEFAULT_PORT);
-    } else if (strncmp(input, "/fav", 4) == 0) {
-        FILE *fp = fopen("fav.txt", "r");
-        if (!fp) {
-            printf("[-] Could not open fav.txt\n");
-            return;
+void *receiver_thread(void *arg) {
+    ChatTab *tab = (ChatTab *)arg;
+    char buffer[MAX_MSG_LENGTH];
+    while (1) {
+        memset(buffer, 0, sizeof(buffer));
+        ssize_t len = recv(tab->sockfd, buffer, sizeof(buffer) - 1, 0);
+        if (len <= 0) break;  // disconnected or error
+        if (tab->msg_count < MAX_MSGS) {
+            snprintf(tab->messages[tab->msg_count++], MAX_MSG_LENGTH, "Server: %s", buffer);
+            if (tab == &tabs[current_tab]) draw_messages();
         }
-        char ip[64];
-        fgets(ip, sizeof(ip), fp);
-        ip[strcspn(ip, "\n")] = 0;
-        fclose(fp);
-        disconnect();
-        connect_to_server(ip, DEFAULT_PORT);
-    } else {
-        printf("[-] Unknown command\n");
     }
+    if (tab->msg_count < MAX_MSGS)
+        snprintf(tab->messages[tab->msg_count++], MAX_MSG_LENGTH, "Disconnected.");
+    if (tab == &tabs[current_tab]) draw_messages();
+    close(tab->sockfd);
+    tab->sockfd = -1;
+    return NULL;
+}
+
+void add_message(ChatTab *tab, const char *fmt, ...) {
+    if (tab->msg_count >= MAX_MSGS) {
+        // shift up messages if full
+        memmove(tab->messages, tab->messages + 1, sizeof(tab->messages[0]) * (MAX_MSGS - 1));
+        tab->msg_count--;
+    }
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(tab->messages[tab->msg_count++], MAX_MSG_LENGTH, fmt, args);
+    va_end(args);
 }
 
 int main() {
-    char input[BUFFER_SIZE];
+    // Init tabs: mark sockfd invalid
+    for (int i = 0; i < MAX_TABS; i++) {
+        tabs[i].sockfd = -1;
+        tabs[i].msg_count = 0;
+        tabs[i].name[0] = 0;
+        tabs[i].ip[0] = 0;
+    }
 
-    printf("Commands: /join <ip>, /leave, /fav\n");
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE);
+
+    draw_tab_bar();
+
+    for (int i = 0; i < MAX_TABS; i++) {
+        tabs[i].win = newwin(LINES - 4, COLS, 1, 0);
+        box(tabs[i].win, 0, 0);
+        wrefresh(tabs[i].win);
+    }
+
+    input_win = newwin(3, COLS, LINES - 3, 0);
+    box(input_win, 0, 0);
+    mvwprintw(input_win, 1, 1, "> ");
+    wrefresh(input_win);
+
+    draw_messages();
+
+    char input[MAX_MSG_LENGTH];
+    pthread_t recv_threads[MAX_TABS];
 
     while (1) {
-        printf("> ");
-        if (!fgets(input, sizeof(input), stdin)) break;
-        input[strcspn(input, "\n")] = 0;
+        werase(input_win);
+        box(input_win, 0, 0);
+        mvwprintw(input_win, 1, 1, "> ");
+        wrefresh(input_win);
 
-        if (input[0] == '/') {
-            handle_command(input);
-        } else if (connected) {
-            send(sockfd, input, strlen(input), 0);
+        wgetnstr(input_win, input, sizeof(input) - 1);
+
+        if (strcmp(input, "/quit") == 0) break;
+        else if (strcmp(input, "/tab") == 0) {
+            switch_tab(1);
+        }
+        else if (strncmp(input, "/join ", 6) == 0) {
+            char ip[64], name[MAX_NAME_LENGTH];
+            if (sscanf(input + 6, "%63s %63s", ip, name) == 2) {
+                int sockfd = connect_to_server(ip, PORT);
+                if (sockfd < 0) {
+                    add_message(&tabs[current_tab], "Failed to connect to %s", ip);
+                } else {
+                    // Close old socket if open
+                    if (tabs[current_tab].sockfd >= 0) close(tabs[current_tab].sockfd);
+
+                    strncpy(tabs[current_tab].ip, ip, sizeof(tabs[current_tab].ip));
+                    strncpy(tabs[current_tab].name, name, sizeof(tabs[current_tab].name));
+                    tabs[current_tab].sockfd = sockfd;
+                    add_message(&tabs[current_tab], "Connected to %s (%s)", name, ip);
+
+                    pthread_create(&recv_threads[current_tab], NULL, receiver_thread, &tabs[current_tab]);
+                    pthread_detach(recv_threads[current_tab]);
+                }
+            } else {
+                add_message(&tabs[current_tab], "Usage: /join <ip> <name>");
+            }
+            draw_tab_bar();
+            draw_messages();
+        }
+        else if (strncmp(input, "/fav ", 5) == 0) {
+            char ip[64], name[MAX_NAME_LENGTH];
+            if (sscanf(input + 5, "%63s %63s", ip, name) == 2) {
+                FILE *f = fopen("favorites.txt", "a");
+                if (f) {
+                    fprintf(f, "%s %s\n", ip, name);
+                    fclose(f);
+                    add_message(&tabs[current_tab], "Saved favorite: %s (%s)", name, ip);
+                } else {
+                    add_message(&tabs[current_tab], "Failed to open favorites.txt");
+                }
+            } else {
+                add_message(&tabs[current_tab], "Usage: /fav <ip> <name>");
+            }
+            draw_messages();
+        }
+        else if (strcmp(input, "/list") == 0) {
+            FILE *f = fopen("favorites.txt", "r");
+            if (f) {
+                add_message(&tabs[current_tab], "Favorites:");
+                char ip[64], name[MAX_NAME_LENGTH];
+                while (fscanf(f, "%63s %63s", ip, name) == 2) {
+                    add_message(&tabs[current_tab], " - %s (%s)", name, ip);
+                }
+                fclose(f);
+            } else {
+                add_message(&tabs[current_tab], "No favorites found.");
+            }
+            draw_messages();
+        }
+        else if (tabs[current_tab].sockfd >= 0) {
+            // Normal chat message
+            send(tabs[current_tab].sockfd, input, strlen(input), 0);
+            add_message(&tabs[current_tab], "You: %s", input);
+            draw_messages();
         } else {
-            printf("[-] Not connected. Use /join <ip> or /fav.\n");
+            add_message(&tabs[current_tab], "Not connected to any server. Use /join <ip> <name>");
+            draw_messages();
         }
     }
 
-    disconnect();
+    // Cleanup sockets
+    for (int i = 0; i < MAX_TABS; i++) {
+        if (tabs[i].sockfd >= 0) close(tabs[i].sockfd);
+    }
+
+    endwin();
     return 0;
 }
