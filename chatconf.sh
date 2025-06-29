@@ -31,7 +31,7 @@ case $1 in
                 nano config.h
                 ;;
         *)
-                echo "Usage: ./build.sh install|build|clean|configure"
+                echo "Usage: $0 install|build|clean|configure"
                 exit 1
                 ;;
 esac
