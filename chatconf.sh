@@ -1,13 +1,14 @@
 #!/bin/bash
 
 buildchatd() {
-if [ -e $(pwd)/chatd ]; then
-        echo "ALREADY COMPILED"
-        exit 1
-fi
-
-gcc -Wall -Wextra -pthread client.c -lncursesw -o client
-gcc -Wall -pthread chatd.c -o chatd
+        if [ -e $(pwd)/chatd ]; then
+                echo "W: Already built, exiting."
+                exit 0
+        fi
+        ceho "Building client..."
+        gcc -Wall -Wextra -pthread client.c -lncursesw -o client
+        echo "Building chatd..."
+        gcc -Wall -pthread chatd.c -o chatd
 }
 
 case $1 in
